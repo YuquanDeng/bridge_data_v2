@@ -75,10 +75,12 @@ def annotate_images(filtered_images, root_dir):
 
     # NOTE: the same environment should use the same extrinsic matrix.
     if os.path.exists(annotation_path):
+        print(f"{annotation_path} has already exist.")
         return 
     
-    for item in filtered_images:
-        # import pdb;pdb.set_trace()
+    print(f"There are {len(filtered_images)} images need to annotate.")
+    for idx in range(len(filtered_images)):
+        item = filtered_images[idx]
         img_path = item['img_path']
         xyz = item['xyz']
         img = plt.imread(img_path)
@@ -87,10 +89,13 @@ def annotate_images(filtered_images, root_dir):
         ax.set_title(f"Click to annotate: {xyz[0]:.3f}, {xyz[1]:.3f}, {xyz[2]:.3f}")
         cid = fig.canvas.mpl_connect('button_press_event', lambda event: onclick(event, img_path, xyz))
         plt.show()
+        print(f"{idx}/{len(filtered_images)-1}")
 
+    plt.close()
     with open(os.path.join(root_dir, 'annotations3d.json'), 'w') as f:
         # Use default=json_util.default if you're using PyMongo or define a custom handler for numpy types
         json.dump(annotations, f, indent=4, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+        print(f"Saved {os.path.join(root_dir, 'annotations3d.json')}")
 
 
 def PnPsolve(root_dir):
@@ -218,6 +223,53 @@ def keypose_discovery(grasp_continuous, threshold=0.02):
     # import pdb; pdb.set_trace()
 
     return gripper_changed
+
+def select_images(traj_dir):
+    all_obs_dict = [x for x in glob.glob(os.path.join(traj_dir, 'traj*/obs_dict.pkl'))]
+    filtered_images = []
+    for x in sorted(all_obs_dict):
+        with open(x, 'rb') as f:
+            obs_dict = pickle.load(f)
+        z_traj = [s[2] for s in obs_dict['state']]
+        min_z = min(z_traj)
+        if min_z < 0.02:   
+            min_idx = z_traj.index(min_z)
+            img_path = x.replace('obs_dict.pkl', f'images0/im_{min_idx}.jpg')
+            xyz = obs_dict['state'][min_idx][:3]
+            filtered_images.append({'img_path': img_path, 'xyz': xyz})
+    return filtered_images
+
+def get_bridge_data_v2_extrinsics(root_dir, dataset_dir, save_dir, traj_idx=-1, traj_group_idx=-1, save_video=False, save_image=False, representation="full_traj", use_default_extr=False):
+    task_env_dir = os.path.join(root_dir, dataset_dir)
+    group_numbers = [d for d in os.listdir(task_env_dir) if os.path.isdir(os.path.join(task_env_dir, d))]
+
+    group_numbers.sort(key=lambda x: int(x))
+    dataset_group_numbers_dirs = [os.path.join(task_env_dir, num) for num in group_numbers]
+    dataset_date_dirs = []    
+
+    for dataset_group_number_dir in dataset_group_numbers_dirs:
+        date_folders = os.listdir(dataset_group_number_dir)
+        curr_dataset_date_dirs = [os.path.join(dataset_group_number_dir, date_name) for date_name in date_folders]
+        dataset_date_dirs = dataset_date_dirs + curr_dataset_date_dirs
+    # NOTE example: /home/nil/manipulation/datasets/raw/bridge_data_v2/datacol1_toykitchen1/many_skills/12/2023-04-04_11-47-48
+    
+    all_selected_traj_images = []
+    for dataset_traj_date_dir in dataset_date_dirs:
+        traj_dirs = [x for x in glob.glob(os.path.join(dataset_traj_date_dir, "raw", 'traj_group*'))]
+        sorted_traj_dirs = sorted(traj_dirs, key=lambda x: int(os.path.basename(x)[10:]))
+        # NOTE case: no images.
+        if len(sorted_traj_dirs) == 0:
+            print(f"{os.path.join(dataset_traj_date_dir, 'raw', 'traj_group*')} does not exit. skip.")
+            continue
+
+        for traj_dir in sorted_traj_dirs:   
+            selected_traj_images = select_images(traj_dir=traj_dir)
+            all_selected_traj_images = all_selected_traj_images + selected_traj_images
+        
+    annotate_images(filtered_images=all_selected_traj_images, root_dir=task_env_dir)
+    rvec, tvec = PnPsolve(root_dir=task_env_dir)
+
+    print("rvec: ", rvec, "\n tvec: ", tvec)
 
 def extract_trajectory(root_dir, dataset_dir, save_dir, traj_idx=-1, traj_group_idx=-1, save_video=False, save_image=False, representation="full_traj", use_default_extr=False):
     traj_group_idx = '*' if traj_group_idx == -1 else traj_group_idx
@@ -517,7 +569,8 @@ def main():
     # /home/nil/manipulation/datasets/raw/bridge_data_v2/datacol2_toykitchen6/many_skills/00/2023-03-11_15-09-05
     # /home/nil/manipulation/datasets/raw/bridge_data_v2/datacol1_toykitchen1/many_skills/0/2023-03-15_14-35-28
     parser.add_argument("--root_dir", type=str, default="/home/nil/manipulation/datasets/raw")
-    parser.add_argument("--dataset_dir", type=str, default="bridge_data_v2/datacol1_toykitchen1/many_skills/0/2023-03-15_14-35-28")
+    # parser.add_argument("--dataset_dir", type=str, default="bridge_data_v2/datacol1_toykitchen1/many_skills/0/2023-03-15_14-35-28")
+    parser.add_argument("--dataset_dir", type=str, default="bridge_data_v2/datacol1_toykitchen1/many_skills")
     parser.add_argument("--save_dir", type=str, default="/home/nil/manipulation/datasets/sanity_check")
     parser.add_argument("--traj_group_idx", type=int, default=0)
     parser.add_argument("--traj_idx", type=int, default=-1)
@@ -550,8 +603,19 @@ def main():
             use_default_extr=use_default_extr
         )
     else:
-        # debug_projection(rvec, tvec)
-        extract_trajectory(
+        # # debug_projection(rvec, tvec)
+        # extract_trajectory(
+        #     root_dir=root_dir,
+        #     dataset_dir=dataset_dir,
+        #     traj_group_idx=traj_group_idx,
+        #     traj_idx=traj_idx,
+        #     save_video=save_video, 
+        #     save_dir=save_dir,
+        #     save_image=save_image,
+        #     representation=representation,
+        #     use_default_extr=use_default_extr
+        # )
+        get_bridge_data_v2_extrinsics(
             root_dir=root_dir,
             dataset_dir=dataset_dir,
             traj_group_idx=traj_group_idx,
@@ -560,7 +624,7 @@ def main():
             save_dir=save_dir,
             save_image=save_image,
             representation=representation,
-            use_default_extr=use_default_extr
+            use_default_extr=use_default_extr            
         )
 
 if __name__ == "__main__":
