@@ -7,7 +7,7 @@ import numpy as np
 import cv2
 import argparse
 import math
-
+import copy
 one_group_folder = '/home/nil/manipulation/datasets/raw/bridge_data_v2/datacol1_toykitchen1/many_skills/0/2023-03-15_14-35-28/'
 # one_group_folder = '/home/liyi/Manipulation/dataset/BridgeDataV2/scripted_6_18/scripted_raw/2022-12-08_pnp_rigid_objects/2022-12-08_15-22-17/'
 # one_group_folder = '/home/liyi/Manipulation/dataset/2023-03-15_14-35-28/'
@@ -31,72 +31,110 @@ intrinsicMatrix = np.array([
     [0, 0, 1],
 ])
 
-def filter_images(traj_group_dir):
+def filter_images(traj_group_dir, all=False):
     all_obs_dict = [x for x in glob.glob(os.path.join(traj_group_dir, 'traj*/obs_dict.pkl'))]
+    
+    if len(all_obs_dict) < 25:
+        num_imgs_per_traj = math.ceil(25 // len(all_obs_dict))
+    elif len(all_obs_dict) >= 35:
+        traj_idxs = np.random.randint(0, len(all_obs_dict), size=(len(all_obs_dict) // 2))
+        all_obs_dict_copy = copy.deepcopy(all_obs_dict)
+        all_obs_dict = []
+        for traj_idx in traj_idxs:
+            all_obs_dict.append(all_obs_dict_copy[traj_idx])
+
     filtered_images = []
     for x in sorted(all_obs_dict):
         with open(x, 'rb') as f:
             obs_dict = pickle.load(f)
         z_traj = [s[2] for s in obs_dict['state']]
-        min_z = min(z_traj) # TODO
-        if min_z < 0.02:    # TODO
-            min_idx = z_traj.index(min_z)
-            img_path = x.replace('obs_dict.pkl', f'images0/im_{min_idx}.jpg')
-            xyz = obs_dict['state'][min_idx][:3]
-            filtered_images.append({'img_path': img_path, 'xyz': xyz})
+        z_traj.sort()
+        
+        if len(all_obs_dict) >= 17:
+            min_z = min(z_traj) 
+            if min_z < 0.02:    
+                min_idx = z_traj.index(min_z)
+                img_path = x.replace('obs_dict.pkl', f'images0/im_{min_idx}.jpg')
+                xyz = obs_dict['state'][min_idx][:3]
+                filtered_images.append({'img_path': img_path, 'xyz': xyz})
+        else:
+            # NOTE: if the number of trajectory is less than 6, then annotate 4 times more images.
+            z_traj.sort()
+            min_x = z_traj[:num_imgs_per_traj]
+            for min_num in min_x:
+                if min_num < 0.02:
+                    min_idx = z_traj.index(min_num)
+                    img_path = x.replace('obs_dict.pkl', f'images0/im_{min_idx}.jpg')
+                    xyz = obs_dict['state'][min_idx][:3]
+                    filtered_images.append({'img_path': img_path, 'xyz': xyz}) 
+    print("Total selected filtered images: ", len(filtered_images))
     return filtered_images
 
-def random_images():
-    all_obs_dict = [x for x in glob.glob(os.path.join(one_group_folder, 'raw/traj_group0/traj*/obs_dict.pkl'))]
+def random_images(traj_group_dir):
+    all_obs_dict = [x for x in glob.glob(os.path.join(traj_group_dir, 'traj*/obs_dict.pkl'))]
+    
+    traj_idxs = np.arange(0, len(all_obs_dict))
+    if len(all_obs_dict) >= 33:
+        traj_idxs = np.random.randint(0, len(all_obs_dict), size=(len(all_obs_dict) // 2))
+    
+    traj_idxs = traj_idxs.tolist()
+
     filtered_images = []
-    for x in sorted(all_obs_dict):
+    for idx in traj_idxs:
+        x = all_obs_dict[idx]
         with open(x, 'rb') as f:
             obs_dict = pickle.load(f)
-        
+
         random_idx = np.random.randint(0, len(obs_dict['state']))    
         img_path = x.replace('obs_dict.pkl', f'images0/im_{random_idx}.jpg')
         xyz = obs_dict['state'][random_idx][:3]
         filtered_images.append({'img_path': img_path, 'xyz': xyz})
+
+    print("Total selected filtered images: ", len(filtered_images))
+
+
     return filtered_images
     
 annotations = []
 
-def onclick(event, img_path, xyz):
+def onclick(event, img_path, xyz, abandon_threshold=(100, 400)):
     ix, iy = event.xdata, event.ydata
-    annotations.append({
-        'img_path': img_path,
-        'pixel_coordinates': (ix, iy),
-        'xyz': xyz
-    })
-    plt.close()
+    # print("ix, iy", ix, iy)
 
-def annotate_images(filtered_images, root_dir):
+    x_threshold, y_threshold = abandon_threshold
+    if ix <= x_threshold and iy >= y_threshold:
+        print(f"discard {xyz}")
+        plt.close()
+        return
+    else:
+        annotations.append({
+            'img_path': img_path,
+            'pixel_coordinates': (ix, iy),
+            'xyz': xyz
+        })
+        plt.close()
+
+def annotate_images(filtered_images, root_dir, exist_return=True, abandon_threshold=(100, 400)):
     annotation_path = os.path.join(root_dir, 'annotations3d.json')
 
     # NOTE: the same environment should use the same extrinsic matrix.
-    if os.path.exists(annotation_path):
-        print(f"{annotation_path} has already exist.")
+    if os.path.exists(annotation_path) and exist_return:
         return 
     
-    print(f"There are {len(filtered_images)} images need to annotate.")
-    for idx in range(len(filtered_images)):
-        item = filtered_images[idx]
+    for item in filtered_images:
+        # import pdb;pdb.set_trace()
         img_path = item['img_path']
         xyz = item['xyz']
         img = plt.imread(img_path)
         fig, ax = plt.subplots()
         ax.imshow(img)
         ax.set_title(f"Click to annotate: {xyz[0]:.3f}, {xyz[1]:.3f}, {xyz[2]:.3f}")
-        cid = fig.canvas.mpl_connect('button_press_event', lambda event: onclick(event, img_path, xyz))
+        cid = fig.canvas.mpl_connect('button_press_event', lambda event: onclick(event, img_path, xyz, abandon_threshold=abandon_threshold))
         plt.show()
-        print(f"{idx}/{len(filtered_images)-1}")
 
-    plt.close()
     with open(os.path.join(root_dir, 'annotations3d.json'), 'w') as f:
         # Use default=json_util.default if you're using PyMongo or define a custom handler for numpy types
         json.dump(annotations, f, indent=4, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
-        print(f"Saved {os.path.join(root_dir, 'annotations3d.json')}")
-
 
 def PnPsolve(root_dir):
     annotation = os.path.join(root_dir, 'annotations3d.json')
@@ -156,46 +194,6 @@ def debug_projection(rvec, tvec):
         # plt.title("Annotated (Red) vs Computed (Green) Points")
         # plt.axis('off')  # Hide axes
         # plt.show()
-    
-def visualize_extrinsic_matrix(rvec, tvec, overlay=False):
-    all_obs_dict = [x for x in glob.glob(os.path.join(one_group_folder, 'raw/traj_group0/traj*/obs_dict.pkl'))]
-    
-    for obs_dict_path in sorted(all_obs_dict):
-        print(obs_dict_path)
-        with open(obs_dict_path, 'rb') as f:
-            obs_dict = pickle.load(f)
-        objectPoints = np.array([s[:3] for s in obs_dict['state']])
-        imgs = []
-        computed_points = []
-        for frame_idx in range(len(objectPoints)):
-            img_path = obs_dict_path.replace('obs_dict.pkl', f'images0/im_{frame_idx}.jpg')
-            img = cv2.imread(img_path)
-            print("load img", img_path)
-            if img is not None:
-                object_points = np.array([obs_dict['state'][frame_idx, :3]])
-                computed_point, _ = cv2.projectPoints(object_points, rvec, tvec, intrinsicMatrix, None)
-                imgs.append(img)
-                computed_points.append(computed_point)
-
-        if overlay:
-            img = np.average(imgs, axis=0).astype(np.uint8)
-            for idx, _ in enumerate(computed_points[:-1]):
-                cv2.line(img, (int(computed_points[idx][0, 0, 0]), int(computed_points[idx][0, 0, 1])), (int(computed_points[idx+1][0, 0, 0]), int(computed_points[idx+1][0, 0, 1])), (0, 0, 255 ), 2)
-                cv2.circle(img, (int(computed_point[0, 0, 0]), int(computed_point[0, 0, 1])), 5, (0, 255, 0), -1)
-            cv2.imshow('Projected Image', img)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
-        else:
-            for idx, (img, computed_point) in enumerate(zip(imgs, computed_points)):
-                # Draw the annotated point in red
-                # cv2.circle(img, (int(annotated_point[0, 0]), int(annotated_point[0, 1])), 5, (0, 0, 255), -1)
-                cv2.circle(img, (int(computed_point[0, 0, 0]), int(computed_point[0, 0, 1])), 5, (0, 255, 0), -1)
-
-                cv2.imshow('Projected Image', img)
-                cv2.waitKey(0)  # Wait for a key press to move to the next image
-                cv2.destroyAllWindows()  # Close the window before next image
-            else:
-                print(f"Image not found: {img_path}")
 
 def keypose_discovery(grasp_continuous, threshold=0.02):
     gripper_changed = np.zeros_like(grasp_continuous)
@@ -224,225 +222,291 @@ def keypose_discovery(grasp_continuous, threshold=0.02):
 
     return gripper_changed
 
-def select_images(traj_dir):
-    all_obs_dict = [x for x in glob.glob(os.path.join(traj_dir, 'traj*/obs_dict.pkl'))]
-    filtered_images = []
-    for x in sorted(all_obs_dict):
-        with open(x, 'rb') as f:
-            obs_dict = pickle.load(f)
-        z_traj = [s[2] for s in obs_dict['state']]
-        min_z = min(z_traj)
-        if min_z < 0.02:   
-            min_idx = z_traj.index(min_z)
-            img_path = x.replace('obs_dict.pkl', f'images0/im_{min_idx}.jpg')
-            xyz = obs_dict['state'][min_idx][:3]
-            filtered_images.append({'img_path': img_path, 'xyz': xyz})
-    return filtered_images
+def get_extrinsics(extrinsic_dir, env_name, skill_name, group_number, date_name):
+    with open(os.path.join(extrinsic_dir, f'{env_name}_extrinsics.pkl'), "rb") as file:
+        extrinsics_dict = pickle.load(file)
+    rvec = extrinsics_dict[skill_name][group_number][date_name]['rvec']
+    tvec = extrinsics_dict[skill_name][group_number][date_name]['tvec']
 
-def get_bridge_data_v2_extrinsics(root_dir, dataset_dir, save_dir, traj_idx=-1, traj_group_idx=-1, save_video=False, save_image=False, representation="full_traj", use_default_extr=False):
-    task_env_dir = os.path.join(root_dir, dataset_dir)
-    group_numbers = [d for d in os.listdir(task_env_dir) if os.path.isdir(os.path.join(task_env_dir, d))]
+    return rvec, tvec    
 
-    group_numbers.sort(key=lambda x: int(x))
-    dataset_group_numbers_dirs = [os.path.join(task_env_dir, num) for num in group_numbers]
-    dataset_date_dirs = []    
-
-    for dataset_group_number_dir in dataset_group_numbers_dirs:
-        date_folders = os.listdir(dataset_group_number_dir)
-        curr_dataset_date_dirs = [os.path.join(dataset_group_number_dir, date_name) for date_name in date_folders]
-        dataset_date_dirs = dataset_date_dirs + curr_dataset_date_dirs
-    # NOTE example: /home/nil/manipulation/datasets/raw/bridge_data_v2/datacol1_toykitchen1/many_skills/12/2023-04-04_11-47-48
+def annotate_for_date_dir(valid_date_dirs):
+    # iterate through valid data directory and select the data directory with >= 25 trajectories if exists.
+    reference_date_dir = valid_date_dirs[0]
+    for date_dir in valid_date_dirs:
+        traj_dirs = [x for x in glob.glob(os.path.join(date_dir, f'traj*'))]
+        if len(traj_dirs) >= 25:
+            reference_date_dir = date_dir
+            break
     
-    all_selected_traj_images = []
-    for dataset_traj_date_dir in dataset_date_dirs:
-        traj_dirs = [x for x in glob.glob(os.path.join(dataset_traj_date_dir, "raw", 'traj_group*'))]
-        sorted_traj_dirs = sorted(traj_dirs, key=lambda x: int(os.path.basename(x)[10:]))
-        # NOTE case: no images.
-        if len(sorted_traj_dirs) == 0:
-            print(f"{os.path.join(dataset_traj_date_dir, 'raw', 'traj_group*')} does not exit. skip.")
-            continue
+    filtered_images = filter_images(traj_group_dir=reference_date_dir)
+    if len(filtered_images) < 10:
+        print(f"Only {len(filtered_images)} filtered images. choose random images.")
+        filtered_images = random_images(traj_group_dir=reference_date_dir)
+    
+    # NOTE: overwrite if the annotate3d file already existed
+    annotate_images(filtered_images=filtered_images, root_dir=reference_date_dir, exist_return=False, abandon_threshold=(100, 400))
+    rvec, tvec = PnPsolve(root_dir=reference_date_dir)
+    return rvec, tvec
 
-        for traj_dir in sorted_traj_dirs:   
-            selected_traj_images = select_images(traj_dir=traj_dir)
-            all_selected_traj_images = all_selected_traj_images + selected_traj_images
-        
-    annotate_images(filtered_images=all_selected_traj_images, root_dir=task_env_dir)
-    rvec, tvec = PnPsolve(root_dir=task_env_dir)
+def annotate_extrinsics(
+    root_dir, 
+    env_name, 
+    skill_name, 
+    annotate_group_number, 
+    extrinsic_dir, 
+    annotate_one_group_for_all=False, 
+    start_group_number="-1", 
+    end_group_number="100"
+    ):
+    all_group_numbers = os.listdir(os.path.join(root_dir, env_name, skill_name))
+    # NOTE: ensure all the subdirectories can be converted to integer.
+    all_group_numbers = [x for x in all_group_numbers if x.isdigit()]
+    all_group_numbers.sort(key=lambda x: int(x))
+    
+    if annotate_one_group_for_all:
+        # NOTE: annotate only one group and reused the annotate extrinsics for group within (start_group_number, end_group_number)
+        date_dirs = glob.glob(os.path.join(root_dir, env_name, skill_name, annotate_group_number, "*", "raw", "traj_group0"))
+        valid_date_dirs = [date_dir for date_dir in date_dirs if os.path.isdir(date_dir)]
+        print('annotate group number: ', annotate_group_number)
 
-    print("rvec: ", rvec, "\n tvec: ", tvec)
+        # Annotate
+        rvec, tvec = annotate_for_date_dir(valid_date_dirs=valid_date_dirs)
 
-def extract_trajectory(root_dir, dataset_dir, save_dir, traj_idx=-1, traj_group_idx=-1, save_video=False, save_image=False, representation="full_traj", use_default_extr=False):
-    traj_group_idx = '*' if traj_group_idx == -1 else traj_group_idx
-    traj_idx = '*' if traj_idx == -1 else traj_idx
-
-    dataset_root_dir = os.path.join(root_dir, dataset_dir)
-
-    traj_group_dirs = [x for x in glob.glob(os.path.join(dataset_root_dir, "raw", f'traj_group{traj_group_idx}'))]
-    sorted_traj_group_dirs = sorted(traj_group_dirs, key=lambda x: int(os.path.basename(x)[10:]))
-
-    for traj_group_dir in sorted_traj_group_dirs:
-
-        if use_default_extr:
-            # NOTE: extrinsics for toy kitchen environment. 
-            rvec = np.array([[-3.16437259], [ 1.95749993], [-1.25358838]])
-            tvec = np.array([[-0.13361345], [ 0.21081486] ,[ 0.04935229]])
+        # save annotated extrinsics
+        env_extr_dir = os.path.join(extrinsic_dir, f'{env_name}_extrinsics.pkl')
+        if os.path.exists(env_extr_dir):
+            with open(env_extr_dir, "rb") as file:
+                extrinsics = pickle.load(file)
         else:
-            # TODO: write a new filtered image function that select image under directory "0 00 01 ..."
-            # TODO: after annotate, store the corresponding rvec and tvec with the env name in a dictionary
-            # and save as a pickle file.
-            filtered_images = filter_images(traj_group_dir=traj_group_dir)
-            annotate_images(filtered_images=filtered_images, root_dir=dataset_root_dir)
-            rvec, tvec = PnPsolve(root_dir=dataset_root_dir)
+            extrinsics = {}
 
-        traj_dirs = [x for x in glob.glob(os.path.join(traj_group_dir, f'traj{traj_idx}'))]
-        sorted_traj_dirs = sorted(traj_dirs, key=lambda x: int(os.path.basename(x)[4:]))
+        if skill_name not in extrinsics.keys():
+            extrinsics[skill_name] = {}
 
-        # iterate through each trajectory
-        for curr_traj_idx, traj_dir in enumerate(sorted_traj_dirs):
-            lang_path = os.path.join(traj_dir, 'lang.txt')
-            if os.path.exists(lang_path):
-                with open(lang_path, 'r') as file:
-                    lang_goal = file.readline().rstrip("\n")
+        for curr_group_number in all_group_numbers:
+            if int(curr_group_number) < int(start_group_number) or int(curr_group_number) >= int(end_group_number):
+                continue
+            print("annotate group number: ", curr_group_number)
+            extrinsics[skill_name][curr_group_number] = {}
+            all_date_names = os.listdir(os.path.join(root_dir, env_name, skill_name, curr_group_number))
+            for curr_date_name in all_date_names:
+                extrinsics[skill_name][curr_group_number][curr_date_name] = {"rvec": rvec, "tvec": tvec}
+
+        with open(env_extr_dir, "wb") as file:
+            pickle.dump(extrinsics, file)
+    else:
+        for annotate_group_number in all_group_numbers:
+            if int(annotate_group_number) < int(start_group_number) or int(annotate_group_number) >= int(end_group_number):
+                continue
+            print("annotate group number: ", annotate_group_number)
+            date_dirs = glob.glob(os.path.join(root_dir, env_name, skill_name, annotate_group_number, "*", "raw", "traj_group0"))
+            valid_date_dirs = [date_dir for date_dir in date_dirs if os.path.isdir(date_dir)]
+
+            # Annotate
+            rvec, tvec = annotate_for_date_dir(valid_date_dirs=valid_date_dirs)
+
+            # save annotated extrinsics.
+            env_extr_dir = os.path.join(extrinsic_dir, f'{env_name}_extrinsics.pkl')
+            if os.path.exists(env_extr_dir):
+                with open(env_extr_dir, "rb") as file:
+                    extrinsics = pickle.load(file)
             else:
-                lang_goal = None
+                extrinsics = {}
+            if skill_name not in extrinsics.keys():
+                extrinsics[skill_name] = {}
 
-            obs_dict_path = os.path.join(traj_dir, 'obs_dict.pkl')
-            print(obs_dict_path)
-            with open(obs_dict_path, 'rb') as f:
-                obs_dict = pickle.load(f)
-            
-            # import pdb; pdb.set_trace()
-            objectPoints = np.array([s[:3] for s in obs_dict['state']]) # (N, 3)
+            extrinsics[skill_name][annotate_group_number] = {}
+            all_date_names = os.listdir(os.path.join(root_dir, env_name, skill_name, annotate_group_number))
+            for curr_date_name in all_date_names:
+                extrinsics[skill_name][annotate_group_number][curr_date_name] = {"rvec": rvec, "tvec": tvec}
 
-            grasp_continuous = obs_dict['state'][:, -1] # (N, 1)
-            gripper_close = keypose_discovery(grasp_continuous=grasp_continuous) # 1 means gripper changed, 0 means gripper didn't change.
+            with open(env_extr_dir, "wb") as file:
+                pickle.dump(extrinsics, file)     
 
-            imgs = []
-            computed_points = []
-            for frame_idx in range(len(objectPoints)):
-                img_path = obs_dict_path.replace('obs_dict.pkl', f'images0/im_{frame_idx}.jpg')
-                img = cv2.imread(img_path)
-                print("load img", img_path)
+def extract_trajectory(
+    root_dir,
+    env_name,
+    skill_name,
+    extrinsic_dir=None,
+    save_dir=None,
+    save_video=False,
+    save_image=False,
+    representation="full_traj",
+    start_group_number=-1,
+    end_group_number=100,
+    verbose=False
+):
+    all_group_numbers = os.listdir(os.path.join(root_dir, env_name, skill_name))
+    # NOTE: ensure all the subdirectories can be converted to integer.
+    all_group_numbers = [x for x in all_group_numbers if x.isdigit()]
+    all_group_numbers.sort(key=lambda x: int(x))
 
-                if img is not None:
-                    object_points = np.array([obs_dict['state'][frame_idx, :3]])
-                    computed_point, _ = cv2.projectPoints(object_points, rvec, tvec, intrinsicMatrix, None)
-                    imgs.append(img)
-                    computed_points.append(computed_point)
+    for group_number in all_group_numbers:
+        if int(group_number) < int(start_group_number) or int(group_number) >= int(end_group_number):
+            continue
+        print("process group number: ", group_number)
+    
+        # NOTE: Example: /home/nil/manipulation/datasets/raw/bridge_data_v2/datacol1_toykitchen1/many_skills/00/2023-03-15_13-34-28/raw/traj_group0
+        date_dirs = glob.glob(os.path.join(root_dir, env_name, skill_name, group_number, "*", "raw", "traj_group0"))
+        valid_date_dirs = [date_dir for date_dir in date_dirs if os.path.isdir(date_dir)]
+ 
+        for date_dir in valid_date_dirs:
+            traj_dirs = [x for x in glob.glob(os.path.join(date_dir, f'traj*'))]
+            sorted_traj_dirs = sorted(traj_dirs, key=lambda x: int(os.path.basename(x)[4:]))
+            date_name = date_dir.split('/')[-3]
+            curr_group_number = date_dir.split('/')[-4]
 
-                    # draw the trajectory up to the current timestamp.
-                    if save_video:
-                        # draw text
-                        if lang_goal != None:
-                            font = cv2.FONT_HERSHEY_SIMPLEX
-                            org = (5, 30)
-                            fontScale = 1
-                            color = (153, 255, 255) # yellow color
-                            thickness = 2
+            rvec, tvec = get_extrinsics(extrinsic_dir, env_name, skill_name, curr_group_number, date_name)
 
-                            img = cv2.putText(img, lang_goal, org, font,  
-                            fontScale, color, thickness, cv2.LINE_AA)  
-                        
-                        # draw trajectory
-                        color_indices = np.linspace(0, 1, len(computed_points))
-                        color_indices = color_indices[::-1]
-                        for idx, _ in enumerate(computed_points[:-1]):
-                            if representation == "keypose_traj":
-                                if not gripper_close[idx]:
-                                    continue
-                    
-                            # full_traj or (keypose_traj and gripper close)
-                            color = tuple((255 * np.array(plt.cm.jet(color_indices[idx]))[:3]).astype(int))
-                            color = (int(color[0]), int(color[1]), int(color[2]))                                
-                            
-                            cv2.line(img, (int(computed_points[idx][0, 0, 0]), int(computed_points[idx][0, 0, 1])), 
-                                        (int(computed_points[idx+1][0, 0, 0]), int(computed_points[idx+1][0, 0, 1])), color, 2)
-                        
-                            # color = tuple((255 * np.array(plt.cm.jet(color_indices[-1]))[:3]).astype(int))
-                            # color = (int(color[0]), int(color[1]), int(color[2]))
-                            # cv2.circle(img, (int(computed_point[0, 0, 0]), int(computed_point[0, 0, 1])), 5, color, -1)
-            
-            if save_video:
-                assert save_dir != None
-                height, width = imgs[0].shape[:2]
-                frame_size = (width, height)
-                frame_rate = 3
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            if verbose:
+                print("rvec", rvec, "tvec", tvec)
 
-                save_group_dir = traj_group_dir.replace(root_dir, save_dir)
-                os.makedirs(save_group_dir, exist_ok=True)
-                filename = f'traj{curr_traj_idx}_{representation}.mp4'
-                save_filepath = os.path.join(save_group_dir, filename)
+            # iterate through each trajectory
+            for curr_traj_idx, traj_dir in enumerate(sorted_traj_dirs):
+                lang_path = os.path.join(traj_dir, 'lang.txt')
+                if os.path.exists(lang_path):
+                    with open(lang_path, 'r') as file:
+                        lang_goal = file.readline().rstrip("\n")
+                else:
+                    lang_goal = None
 
-                video_writer = cv2.VideoWriter(save_filepath, fourcc, frame_rate, frame_size)
-                for img in imgs:
-                    video_writer.write(img)
+                obs_dict_path = os.path.join(traj_dir, 'obs_dict.pkl')
 
-                print(f"Saved video to {save_filepath}")
-                print("-"*100)
-                video_writer.release()
-
-            if save_image:
-                assert save_dir != None
-                color_indices = np.linspace(0, 1, len(computed_points))
-                color_indices = color_indices[::-1]
-                reference_img = imgs[0]
-
-                save_group_dir = traj_group_dir.replace(root_dir, save_dir)
-                os.makedirs(save_group_dir, exist_ok=True)
-                filename = f'traj{curr_traj_idx}_{representation}.png'
-                save_filepath = os.path.join(save_group_dir, filename)
-
-                # draw text
-                if lang_goal != None:
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    org = (5, 30)
-                    fontScale = 1
-                    color = (153, 255, 255) # yellow color
-                    thickness = 2
-
-                    reference_img = cv2.putText(reference_img, lang_goal, org, font,  
-                    fontScale, color, thickness, cv2.LINE_AA) 
-
-
-                # draw trajectory
-                if representation == "keypose_traj":
-                    gripper_close_traj_idxs = np.where(gripper_close == 1)[0]
-                    assert len(gripper_close_traj_idxs) != 0, "No gripper close trajectory found."
-                    start_idx = gripper_close_traj_idxs[0]
-                    end_idx = gripper_close_traj_idxs[-1] + 1
-                    computed_points = computed_points[start_idx:end_idx]
+                if verbose:
+                    print(obs_dict_path)
+                with open(obs_dict_path, 'rb') as f:
+                    obs_dict = pickle.load(f)
                 
-                color_indices = np.linspace(0, 1, len(computed_points))
-                color_indices = color_indices[::-1]
-                for idx, _ in enumerate(computed_points[:-1]):
-                    # if representation == "keypose_traj":
-                    #     if not gripper_close[idx]:
-                    #         continue
-            
-                    # full_traj or (keypose_traj and gripper close)
-                    color = tuple((255 * np.array(plt.cm.jet(color_indices[idx]))[:3]).astype(int))
-                    color = (int(color[0]), int(color[1]), int(color[2]))                                
+                objectPoints = np.array([s[:3] for s in obs_dict['state']]) # (N, 3)
+                grasp_continuous = obs_dict['state'][:, -1] # (N, 1)
+                gripper_close = keypose_discovery(grasp_continuous=grasp_continuous) # 1 means gripper changed, 0 means gripper didn't change.
+
+                imgs = []
+                computed_points = []
+                for frame_idx in range(len(objectPoints)):
+                    img_path = obs_dict_path.replace('obs_dict.pkl', f'images0/im_{frame_idx}.jpg')
+                    img = cv2.imread(img_path)
+
+                    if verbose:
+                        print("load img", img_path)
+
+                    if img is not None:
+                        object_points = np.array([obs_dict['state'][frame_idx, :3]])
+                        computed_point, _ = cv2.projectPoints(object_points, rvec, tvec, intrinsicMatrix, None)
+                        imgs.append(img)
+                        computed_points.append(computed_point)
+
+                        # draw the trajectory up to the current timestamp.
+                        if save_video:
+                            # draw text
+                            if lang_goal != None:
+                                font = cv2.FONT_HERSHEY_SIMPLEX
+                                org = (5, 30)
+                                fontScale = 1
+                                color = (153, 255, 255) # yellow color
+                                thickness = 2
+
+                                img = cv2.putText(img, lang_goal, org, font,  
+                                fontScale, color, thickness, cv2.LINE_AA)  
+                            
+                            # draw trajectory
+                            color_indices = np.linspace(0, 1, len(computed_points))
+                            color_indices = color_indices[::-1]
+                            for idx, _ in enumerate(computed_points[:-1]):
+                                if representation == "keypose_traj":
+                                    if not gripper_close[idx]:
+                                        continue
+                        
+                                # full_traj or (keypose_traj and gripper close)
+                                color = tuple((255 * np.array(plt.cm.jet(color_indices[idx]))[:3]).astype(int))
+                                color = (int(color[0]), int(color[1]), int(color[2]))                                
+                                
+                                cv2.line(img, (int(computed_points[idx][0, 0, 0]), int(computed_points[idx][0, 0, 1])), 
+                                            (int(computed_points[idx+1][0, 0, 0]), int(computed_points[idx+1][0, 0, 1])), color, 2)
+                            
+                                # color = tuple((255 * np.array(plt.cm.jet(color_indices[-1]))[:3]).astype(int))
+                                # color = (int(color[0]), int(color[1]), int(color[2]))
+                                # cv2.circle(img, (int(computed_point[0, 0, 0]), int(computed_point[0, 0, 1])), 5, color, -1)
+                
+                if save_video:
+                    assert save_dir != None
+                    height, width = imgs[0].shape[:2]
+                    frame_size = (width, height)
+                    frame_rate = 3
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+                    save_group_dir = date_dir.replace(root_dir, save_dir)
+                    os.makedirs(save_group_dir, exist_ok=True)
+                    filename = f'traj{curr_traj_idx}_{representation}.mp4'
+                    save_filepath = os.path.join(save_group_dir, filename)
+
+                    video_writer = cv2.VideoWriter(save_filepath, fourcc, frame_rate, frame_size)
+                    for img in imgs:
+                        video_writer.write(img)
+
+                    if verbose:
+                        print(f"Saved video to {save_filepath}")
+                        print("-"*100)
+                    video_writer.release()
+
+                if save_image:
+                    assert save_dir != None
+                    color_indices = np.linspace(0, 1, len(computed_points))
+                    color_indices = color_indices[::-1]
+                    reference_img = imgs[0]
+
+                    save_group_dir = date_dir.replace(root_dir, save_dir)
+                    os.makedirs(save_group_dir, exist_ok=True)
+                    filename = f'traj{curr_traj_idx}_{representation}.png'
+                    save_filepath = os.path.join(save_group_dir, filename)
+
+                    # draw text
+                    if lang_goal != None:
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        org = (5, 30)
+                        fontScale = 1
+                        color = (153, 255, 255) # yellow color
+                        thickness = 2
+
+                        reference_img = cv2.putText(reference_img, lang_goal, org, font,  
+                        fontScale, color, thickness, cv2.LINE_AA) 
+
+
+                    # draw trajectory
+                    if representation == "keypose_traj":
+                        gripper_close_traj_idxs = np.where(gripper_close == 1)[0]
+                        assert len(gripper_close_traj_idxs) != 0, "No gripper close trajectory found."
+                        start_idx = gripper_close_traj_idxs[0]
+                        end_idx = gripper_close_traj_idxs[-1] + 1
+                        computed_points = computed_points[start_idx:end_idx]
                     
-                    cv2.line(reference_img, (int(computed_points[idx][0, 0, 0]), int(computed_points[idx][0, 0, 1])), 
-                                (int(computed_points[idx+1][0, 0, 0]), int(computed_points[idx+1][0, 0, 1])), color, 2)
+                    color_indices = np.linspace(0, 1, len(computed_points))
+                    color_indices = color_indices[::-1]
+                    for idx, _ in enumerate(computed_points[:-1]):
+                        color = tuple((255 * np.array(plt.cm.jet(color_indices[idx]))[:3]).astype(int))
+                        color = (int(color[0]), int(color[1]), int(color[2]))                                
+                        
+                        cv2.line(reference_img, (int(computed_points[idx][0, 0, 0]), int(computed_points[idx][0, 0, 1])), 
+                                    (int(computed_points[idx+1][0, 0, 0]), int(computed_points[idx+1][0, 0, 1])), color, 2)
 
-                # start point
-                color = tuple((255 * np.array(plt.cm.jet(color_indices[0]))[:3]).astype(int))
-                color = (int(color[0]), int(color[1]), int(color[2]))
-                cv2.circle(reference_img, (int(computed_points[0][0, 0, 0]), int(computed_points[0][0, 0, 1])), 5, color, -1)
+                    # start point
+                    color = tuple((255 * np.array(plt.cm.jet(color_indices[0]))[:3]).astype(int))
+                    color = (int(color[0]), int(color[1]), int(color[2]))
+                    cv2.circle(reference_img, (int(computed_points[0][0, 0, 0]), int(computed_points[0][0, 0, 1])), 5, color, -1)
 
-                # end point
-                color = tuple((255 * np.array(plt.cm.jet(color_indices[-1]))[:3]).astype(int))
-                color = (int(color[0]), int(color[1]), int(color[2]))
-                cv2.circle(reference_img, (int(computed_points[-1][0, 0, 0]), int(computed_points[-1][0, 0, 1])), 5, color, -1)
+                    # end point
+                    color = tuple((255 * np.array(plt.cm.jet(color_indices[-1]))[:3]).astype(int))
+                    color = (int(color[0]), int(color[1]), int(color[2]))
+                    cv2.circle(reference_img, (int(computed_points[-1][0, 0, 0]), int(computed_points[-1][0, 0, 1])), 5, color, -1)
 
-                cv2.imwrite(save_filepath, reference_img)
+                    cv2.imwrite(save_filepath, reference_img)
 
-                print(f"Saved video to {save_filepath}")
-                print("-"*100)
+                    if verbose:
+                        print(f"Saved video to {save_filepath}")
+                        print("-"*100)
 
-def get_meta_info_from_trajectory(traj_dir, rvec, tvec):
+def get_meta_info_from_trajectory(traj_dir, rvec, tvec, verbose=False):
     # reference
     """
     lang_goal: language goal of the trajectory (string)
@@ -479,7 +543,9 @@ def get_meta_info_from_trajectory(traj_dir, rvec, tvec):
         lang_goal = None
 
     obs_dict_path = os.path.join(traj_dir, 'obs_dict.pkl')
-    print(obs_dict_path)
+
+    if verbose:
+        print(obs_dict_path)
     with open(obs_dict_path, 'rb') as f:
         obs_dict = pickle.load(f)
     
@@ -490,7 +556,9 @@ def get_meta_info_from_trajectory(traj_dir, rvec, tvec):
     for frame_idx in range(len(objectPoints)):
         img_path = obs_dict_path.replace('obs_dict.pkl', f'images0/im_{frame_idx}.jpg')
         img = cv2.imread(img_path)
-        print("load img", img_path)
+
+        if verbose:
+            print("load img", img_path)
 
         if img is not None:
             object_points = np.array([obs_dict['state'][frame_idx, :3]])
@@ -510,56 +578,76 @@ def get_meta_info_from_trajectory(traj_dir, rvec, tvec):
 
     meta_info["trajectory_2d"] = np.stack(meta_info["trajectory_2d"], axis=0)
     meta_info["trajectory_3d"] = np.stack(meta_info["trajectory_3d"], axis=0)
-    meta_info["keypose_2d"] = np.stack(meta_info["keypose_2d"], axis=0)
-    meta_info["keypose_3d"] = np.stack(meta_info["keypose_3d"], axis=0)
+
+    # set to None if not keypose trajectory found.
+    if len(meta_info["keypose_2d"]) == 0 or len(meta_info["keypose_3d"]) == 0:
+        print(f"no keypose trajectory found in {traj_dir}.")
+        meta_info["keypose_2d"] = None
+        meta_info["keypose_3d"] = None
+    else:
+        meta_info["keypose_2d"] = np.stack(meta_info["keypose_2d"], axis=0)
+        meta_info["keypose_3d"] = np.stack(meta_info["keypose_3d"], axis=0)
 
     return meta_info
 
+def generate_meta_info( 
+        root_dir,
+        env_name,
+        skill_name,
+        extrinsic_dir,
+        save_dir,
+        start_group_number="-1",
+        end_group_number="100",
+        verbose=False
+    ):
+    all_group_numbers = os.listdir(os.path.join(root_dir, env_name, skill_name))
+    # NOTE: ensure all the subdirectories can be converted to integer.
+    all_group_numbers = [x for x in all_group_numbers if x.isdigit()]
+    all_group_numbers.sort(key=lambda x: int(x))
 
-def generate_meta_info( root_dir, dataset_dir, traj_group_idx, traj_idx, save_dir, use_default_extr, representation):
-    traj_group_idx = '*' if traj_group_idx == -1 else traj_group_idx
-    traj_idx = '*' if traj_idx == -1 else traj_idx
+    for group_number in all_group_numbers:
+        if int(group_number) < int(start_group_number) or int(group_number) >= int(end_group_number):
+            continue
+        print("process group number: ", group_number)
 
-    dataset_root_dir = os.path.join(root_dir, dataset_dir)
-    traj_group_dirs = [x for x in glob.glob(os.path.join(dataset_root_dir, "raw", f'traj_group{traj_group_idx}'))]
-    sorted_traj_group_dirs = sorted(traj_group_dirs, key=lambda x: int(os.path.basename(x)[10:]))
+        # NOTE: Example: /home/nil/manipulation/datasets/raw/bridge_data_v2/datacol1_toykitchen1/many_skills/00/2023-03-15_13-34-28/raw/traj_group0
+        date_dirs = glob.glob(os.path.join(root_dir, env_name, skill_name, group_number, "*", "raw", "traj_group0"))
+        valid_date_dirs = [date_dir for date_dir in date_dirs if os.path.isdir(date_dir)]
+ 
+        for date_dir in valid_date_dirs:
+            traj_dirs = [x for x in glob.glob(os.path.join(date_dir, f'traj*'))]
+            sorted_traj_dirs = sorted(traj_dirs, key=lambda x: int(os.path.basename(x)[4:]))
+            date_name = date_dir.split('/')[-3]
+            curr_group_number = date_dir.split('/')[-4]
+        
+            rvec, tvec = get_extrinsics(extrinsic_dir, env_name, skill_name, curr_group_number, date_name)
+            if verbose:
+                print("rvec", rvec, "tvec", tvec)
 
-    # iterate over a trajectory group (e.g. trajgroup0)
-    for traj_group_dir in sorted_traj_group_dirs:
-        if use_default_extr:
-            # NOTE: extrinsics for toy kitchen environment. 
-            rvec = np.array([[-3.16437259], [ 1.95749993], [-1.25358838]])
-            tvec = np.array([[-0.13361345], [ 0.21081486] ,[ 0.04935229]])
-        else:
-            filtered_images = filter_images(traj_group_dir=traj_group_dir)
-            annotate_images(filtered_images=filtered_images, root_dir=dataset_root_dir)
-            rvec, tvec = PnPsolve(root_dir=dataset_root_dir)
+            # iterate through each trajectory (e.g. traj0, traj1)
+            for curr_traj_idx, traj_dir in enumerate(sorted_traj_dirs):
+                meta_info = get_meta_info_from_trajectory(traj_dir=traj_dir, rvec=rvec, tvec=tvec)
 
-        traj_dirs = [x for x in glob.glob(os.path.join(traj_group_dir, f'traj{traj_idx}'))]
-        sorted_traj_dirs = sorted(traj_dirs, key=lambda x: int(os.path.basename(x)[4:]))
+                # # sanity check
+                # for k, v in meta_info.items():
+                #     if isinstance(v, np.ndarray):
+                #         print(k, v.shape)
+                #     elif isinstance(v, str):
+                #         print(k, v)
+                #     elif isinstance(k, dict):
+                #         print(k, k.keys())
 
-        # iterate through each trajectory (e.g. traj0, traj1)
-        for curr_traj_idx, traj_dir in enumerate(sorted_traj_dirs):
-            meta_info = get_meta_info_from_trajectory(traj_dir=traj_dir, rvec=rvec, tvec=tvec)
-
-            # # sanity check
-            # for k, v in meta_info.items():
-            #     if isinstance(v, np.ndarray):
-            #         print(k, v.shape)
-            #     elif isinstance(v, str):
-            #         print(k, v)
-            #     elif isinstance(k, dict):
-            #         print(k, k.keys())
-
-            # save meta info
-            save_group_dir = traj_group_dir.replace(root_dir, save_dir)
-            os.makedirs(save_group_dir, exist_ok=True)
-            filename = f'traj{curr_traj_idx}_meta_info.pkl'
-            save_filepath = os.path.join(save_group_dir, filename)
-            with open(save_filepath, 'wb') as file:
-                pickle.dump(meta_info, file)
-                print(f"Saved to {save_filepath}")
-                print("-"*100)
+                # save meta info
+                save_group_dir = date_dir.replace(root_dir, save_dir)
+                os.makedirs(save_group_dir, exist_ok=True)
+                filename = f'traj{curr_traj_idx}_meta_info.pkl'
+                save_filepath = os.path.join(save_group_dir, filename)
+                with open(save_filepath, 'wb') as file:
+                    pickle.dump(meta_info, file)
+                
+                if verbose:
+                    print(f"Saved to {save_filepath}")
+                    print("-"*100)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -568,67 +656,76 @@ def main():
     
     # /home/nil/manipulation/datasets/raw/bridge_data_v2/datacol2_toykitchen6/many_skills/00/2023-03-11_15-09-05
     # /home/nil/manipulation/datasets/raw/bridge_data_v2/datacol1_toykitchen1/many_skills/0/2023-03-15_14-35-28
-    parser.add_argument("--root_dir", type=str, default="/home/nil/manipulation/datasets/raw")
-    # parser.add_argument("--dataset_dir", type=str, default="bridge_data_v2/datacol1_toykitchen1/many_skills/0/2023-03-15_14-35-28")
-    parser.add_argument("--dataset_dir", type=str, default="bridge_data_v2/datacol1_toykitchen1/many_skills")
+    parser.add_argument("--root_dir", type=str, default="/home/nil/manipulation/datasets/raw/bridge_data_v2")
+    parser.add_argument("--env_name", type=str, default="datacol1_toykitchen1")
+    parser.add_argument("--skill_name", type=str, default="many_skills")
+    parser.add_argument("--extrinsic_dir", type=str, default="/home/nil/manipulation/datasets/extrinsics")
+    parser.add_argument("--start_group_number", type=str, default="-1")
+    parser.add_argument("--end_group_number", type=str, default="100")
+
+    # EXTRACT TRAJECTORY & META INFO
     parser.add_argument("--save_dir", type=str, default="/home/nil/manipulation/datasets/sanity_check")
-    parser.add_argument("--traj_group_idx", type=int, default=0)
-    parser.add_argument("--traj_idx", type=int, default=-1)
     parser.add_argument("--save_video", action="store_true")
     parser.add_argument("--save_image", action="store_true")
     parser.add_argument("--representation", type=str, default="full_traj") # {full_traj, keypose_traj}
-    parser.add_argument("--use_default_extr", action="store_true")  # use default annotated extrinsics matrix
     parser.add_argument("--store_meta_info", action="store_true")
-    args = parser.parse_args()
 
-    save_dir = args.save_dir
-    root_dir = args.root_dir
-    dataset_dir = args.dataset_dir
-    traj_group_idx = args.traj_group_idx
-    traj_idx =  args.traj_idx
-    save_video = args.save_video
-    save_image = args.save_image
-    representation = args.representation
-    use_default_extr = args.use_default_extr
+    # ANNOTATION
+    parser.add_argument("--annotate_group_number", type=str, default="-1")
+    parser.add_argument("--annotate", action="store_true")
+    parser.add_argument("--annotate_one_group", action="store_true")
+
+    args = parser.parse_args()
+    annotate = args.annotate
     store_meta_info = args.store_meta_info
 
     if store_meta_info:
+        print("-"*50)
+        print("store meta info")
+        print("-"*50)
         generate_meta_info(
-            root_dir=root_dir,
-            dataset_dir=dataset_dir,
-            traj_group_idx=traj_group_idx,
-            traj_idx=traj_idx,
-            save_dir=save_dir,
-            representation=representation,
-            use_default_extr=use_default_extr
+            root_dir=args.root_dir,
+            env_name=args.env_name,
+            skill_name=args.skill_name,
+            extrinsic_dir=args.extrinsic_dir,
+            start_group_number=args.start_group_number,
+            end_group_number=args.end_group_number,
+            save_dir=args.save_dir,
+        )
+    elif annotate:
+        print("-"*50)
+        print("annotate extrinsics")
+        print("-"*50)
+        annotate_extrinsics(
+            root_dir=args.root_dir,
+            env_name=args.env_name,
+            skill_name=args.skill_name,
+            annotate_group_number=args.annotate_group_number,
+            extrinsic_dir=args.extrinsic_dir,
+            annotate_one_group_for_all=args.annotate_one_group,
+            start_group_number=args.start_group_number,
+            end_group_number=args.end_group_number
         )
     else:
-        # # debug_projection(rvec, tvec)
-        # extract_trajectory(
-        #     root_dir=root_dir,
-        #     dataset_dir=dataset_dir,
-        #     traj_group_idx=traj_group_idx,
-        #     traj_idx=traj_idx,
-        #     save_video=save_video, 
-        #     save_dir=save_dir,
-        #     save_image=save_image,
-        #     representation=representation,
-        #     use_default_extr=use_default_extr
-        # )
-        get_bridge_data_v2_extrinsics(
-            root_dir=root_dir,
-            dataset_dir=dataset_dir,
-            traj_group_idx=traj_group_idx,
-            traj_idx=traj_idx,
-            save_video=save_video, 
-            save_dir=save_dir,
-            save_image=save_image,
-            representation=representation,
-            use_default_extr=use_default_extr            
+        print("-"*50)
+        print("extract trajectory")
+        print("-"*50)
+
+        # debug_projection(rvec, tvec)
+        extract_trajectory(
+            root_dir=args.root_dir,
+            env_name=args.env_name,
+            skill_name=args.skill_name,
+            extrinsic_dir=args.extrinsic_dir,
+            save_dir=args.save_dir,
+            save_video=args.save_video,
+            save_image=args.save_image,
+            representation=args.representation,
+            start_group_number=args.start_group_number,
+            end_group_number = args.end_group_number
         )
 
 if __name__ == "__main__":
     main()
-
 
 
