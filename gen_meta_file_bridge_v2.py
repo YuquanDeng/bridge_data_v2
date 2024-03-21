@@ -8,6 +8,7 @@ import cv2
 import argparse
 import math
 import copy
+from multiprocessing import Pool
 
 from trajectory_utils_bridge_v2 import generate_meta_info, annotate_extrinsics, extract_trajectory
 
@@ -16,6 +17,18 @@ ALL_ENV_NAMES = ['datacol2_toykitchen7', 'datacol2_toykitchen1', 'datacol2_toysi
                 'deepthought_toykitchen2', 'datacol2_laundry_machine', 'datacol2_toykitchen6', 'datacol1_toykitchen1', \
                 'deepthought_toykitchen1', 'datacol2_toykitchen7_white_tray', 'datacol2_toykitchen5', 'minsky_folding_table_white_tray', \
                 'datacol2_folding_table', 'datacol2_robot_desk', 'datacol2_folding_table_white_tray']
+
+def worker(args):
+    root_dir, env_name, skill_name, extrinsic_dir, start_group_number, end_group_number, save_dir = args
+    generate_meta_info(
+        root_dir=root_dir,
+        env_name=env_name,
+        skill_name=skill_name,
+        extrinsic_dir=extrinsic_dir,
+        start_group_number=start_group_number,
+        end_group_number=end_group_number,
+        save_dir=save_dir,
+    )
 
 def main():
     parser = argparse.ArgumentParser()
@@ -50,21 +63,34 @@ def main():
     if store_meta_info:
         print("-"*50)
         print("store meta info")
+        print(f"cpu count: {os.cpu_count()}")
         print("-"*50)
 
-        # NOTE: This script generate meta file for all bridge v2 environment.
+        # NOTE: parallelism code
+        tasks = []
         for env_name in ALL_ENV_NAMES:
             skill_names = os.listdir(os.path.join(args.root_dir, env_name))
             for skill_name in skill_names:
-                generate_meta_info(
-                    root_dir=args.root_dir,
-                    env_name=env_name,
-                    skill_name=skill_name,
-                    extrinsic_dir=args.extrinsic_dir,
-                    start_group_number=args.start_group_number,
-                    end_group_number=args.end_group_number,
-                    save_dir=args.save_dir,
-                )
+                task = (args.root_dir, env_name, skill_name, args.extrinsic_dir, args.start_group_number, args.end_group_number, args.save_dir)
+                tasks.append(task)
+
+        with Pool(processes=os.cpu_count()) as pool:
+            pool.map(worker, tasks)
+
+        # # NOTE: This script generate meta file for all bridge v2 environment.
+        # for env_name in ALL_ENV_NAMES:
+        #     skill_names = os.listdir(os.path.join(args.root_dir, env_name))
+        #     for skill_name in skill_names:
+        #         generate_meta_info(
+        #             root_dir=args.root_dir,
+        #             env_name=env_name,
+        #             skill_name=skill_name,
+        #             extrinsic_dir=args.extrinsic_dir,
+        #             start_group_number=args.start_group_number,
+        #             end_group_number=args.end_group_number,
+        #             save_dir=args.save_dir,
+        #         )
+
     return
     # elif annotate:
     #     print("-"*50)
