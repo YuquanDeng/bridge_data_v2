@@ -225,8 +225,13 @@ def keypose_discovery(grasp_continuous, threshold=0.02):
 def get_extrinsics(extrinsic_dir, env_name, skill_name, group_number, date_name):
     with open(os.path.join(extrinsic_dir, f'{env_name}_extrinsics.pkl'), "rb") as file:
         extrinsics_dict = pickle.load(file)
-    rvec = extrinsics_dict[skill_name][group_number][date_name]['rvec']
-    tvec = extrinsics_dict[skill_name][group_number][date_name]['tvec']
+    
+    rvec = None
+    tvec = None
+    
+    if group_number in extrinsics_dict[skill_name].keys() and date_name in extrinsics_dict[skill_name][group_number].keys():
+        rvec = extrinsics_dict[skill_name][group_number][date_name]['rvec']
+        tvec = extrinsics_dict[skill_name][group_number][date_name]['tvec']
 
     return rvec, tvec    
 
@@ -522,6 +527,7 @@ def get_meta_info_from_trajectory(traj_dir, rvec, tvec, verbose=False):
     state: x, y, z, roll, yaw, pitch, grasp continuous
     gripper_close: shape (N,) where 1 means gripper close and 0 means gripper open.
     trajectory_dir: (str) the directory of the trajectory
+    Return None if no lang text found.
     """
     meta_info = {
         "lang_goal": None,
@@ -540,7 +546,8 @@ def get_meta_info_from_trajectory(traj_dir, rvec, tvec, verbose=False):
         with open(lang_path, 'r') as file:
             lang_goal = file.readline().rstrip("\n")
     else:
-        lang_goal = None
+        print(f"{lang_path} not found.skip.")
+        return None
 
     obs_dict_path = os.path.join(traj_dir, 'obs_dict.pkl')
 
@@ -553,23 +560,27 @@ def get_meta_info_from_trajectory(traj_dir, rvec, tvec, verbose=False):
     grasp_continuous = obs_dict['state'][:, -1] # (N, 1)
     gripper_close = keypose_discovery(grasp_continuous=grasp_continuous) # 1 means gripper close, 0 means gripper open.
 
+    if not os.path.exists(obs_dict_path.replace('obs_dict.pkl', f'images0')):
+        print(f"Image directory not found: {obs_dict_path.replace('obs_dict.pkl', f'images0')}. Skip.")
+        return None
+
     for frame_idx in range(len(objectPoints)):
-        img_path = obs_dict_path.replace('obs_dict.pkl', f'images0/im_{frame_idx}.jpg')
-        img = cv2.imread(img_path)
+        # img_path = obs_dict_path.replace('obs_dict.pkl', f'images0/im_{frame_idx}.jpg')
+        # img = cv2.imread(img_path)
 
-        if verbose:
-            print("load img", img_path)
+        # if verbose:
+        #     print("load img", img_path)
 
-        if img is not None:
-            object_points = np.array([obs_dict['state'][frame_idx, :3]])
-            computed_point, _ = cv2.projectPoints(object_points, rvec, tvec, intrinsicMatrix, None)
-            
-            meta_info["trajectory_2d"].append(computed_point.squeeze())
-            meta_info["trajectory_3d"].append(object_points.squeeze())
+        # if img is not None:
+        object_points = np.array([obs_dict['state'][frame_idx, :3]])
+        computed_point, _ = cv2.projectPoints(object_points, rvec, tvec, intrinsicMatrix, None)
+        
+        meta_info["trajectory_2d"].append(computed_point.squeeze())
+        meta_info["trajectory_3d"].append(object_points.squeeze())
 
-            if gripper_close[frame_idx]:
-                meta_info["keypose_2d"].append(computed_point.squeeze())
-                meta_info["keypose_3d"].append(object_points.squeeze())               
+        if gripper_close[frame_idx]:
+            meta_info["keypose_2d"].append(computed_point.squeeze())
+            meta_info["keypose_3d"].append(object_points.squeeze())
 
     meta_info["lang_goal"] = lang_goal
     meta_info["state"] = obs_dict['state']
@@ -613,7 +624,7 @@ def generate_meta_info(
         # NOTE: Example: /home/nil/manipulation/datasets/raw/bridge_data_v2/datacol1_toykitchen1/many_skills/00/2023-03-15_13-34-28/raw/traj_group0
         date_dirs = glob.glob(os.path.join(root_dir, env_name, skill_name, group_number, "*", "raw", "traj_group0"))
         valid_date_dirs = [date_dir for date_dir in date_dirs if os.path.isdir(date_dir)]
- 
+
         for date_dir in valid_date_dirs:
             traj_dirs = [x for x in glob.glob(os.path.join(date_dir, f'traj*'))]
             sorted_traj_dirs = sorted(traj_dirs, key=lambda x: int(os.path.basename(x)[4:]))
@@ -621,12 +632,23 @@ def generate_meta_info(
             curr_group_number = date_dir.split('/')[-4]
         
             rvec, tvec = get_extrinsics(extrinsic_dir, env_name, skill_name, curr_group_number, date_name)
+
+            # skip if extrinsics not found.
+            if rvec is None and tvec is None:
+                print(f"Extrinsics not found for {date_dir}.")
+                continue
+            
             if verbose:
                 print("rvec", rvec, "tvec", tvec)
 
             # iterate through each trajectory (e.g. traj0, traj1)
             for curr_traj_idx, traj_dir in enumerate(sorted_traj_dirs):
                 meta_info = get_meta_info_from_trajectory(traj_dir=traj_dir, rvec=rvec, tvec=tvec)
+                
+                if meta_info is None:
+                    print(f"Skip {traj_dir}. Meta info is None.")
+                    print(f"-"*100)
+                    continue
 
                 # # sanity check
                 # for k, v in meta_info.items():
@@ -636,7 +658,7 @@ def generate_meta_info(
                 #         print(k, v)
                 #     elif isinstance(k, dict):
                 #         print(k, k.keys())
-
+                
                 # save meta info
                 save_group_dir = date_dir.replace(root_dir, save_dir)
                 os.makedirs(save_group_dir, exist_ok=True)

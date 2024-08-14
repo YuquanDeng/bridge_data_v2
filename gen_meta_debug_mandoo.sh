@@ -1,0 +1,1 @@
+python3 trajectory_utils_bridge_v2.py --store_meta_info
